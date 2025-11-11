@@ -71,6 +71,5 @@ class InternalSensorManager(
     }
 
     override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) {
-        // Behövs inte för denna lab, men måste implementeras
     }
 }
