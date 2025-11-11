@@ -26,19 +26,12 @@ class InternalSensorManager(
 
     private val gyroscopeSensor: Sensor? =
         sensorManager.getDefaultSensor(Sensor.TYPE_GYROSCOPE)
-
-    // En SharedFlow är bra för "events" som detta.
-    // Vi behöver inte veta om någon lyssnar, vi bara skickar data.
     private val _sensorDataFlow = MutableSharedFlow<SensorData>()
     override val sensorDataFlow: Flow<SensorData> = _sensorDataFlow.asSharedFlow()
-
-    // Vi behöver spara de senaste värdena från båda sensorerna,
-    // eftersom de levererar data oberoende av varandra.
     private var lastAccelData = FloatArray(3)
     private var lastGyroData = FloatArray(3)
 
     init {
-      
         lastAccelData.fill(0f)
         lastGyroData.fill(0f)
     }
@@ -77,7 +70,7 @@ class InternalSensorManager(
         }
     }
 
-    //*override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) {
+    override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) {
         // Behövs inte för denna lab, men måste implementeras
-    }*//
+    }
 }
