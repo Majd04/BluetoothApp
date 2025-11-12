@@ -22,7 +22,7 @@ class InternalSensorManager(
         context.getSystemService(Context.SENSOR_SERVICE) as SensorManager
 
     private val linearAccelSensor: Sensor? =
-        sensorManager.getDefaultSensor(Sensor.TYPE_LINEAR_ACCELERATION)
+        sensorManager.getDefaultSensor(Sensor.TYPE_ACCELEROMETER)
 
     private val gyroscopeSensor: Sensor? =
         sensorManager.getDefaultSensor(Sensor.TYPE_GYROSCOPE)
@@ -51,23 +51,22 @@ class InternalSensorManager(
         if (event == null) return
 
         when (event.sensor.type) {
-            Sensor.TYPE_LINEAR_ACCELERATION -> {
+            Sensor.TYPE_ACCELEROMETER -> {
                 System.arraycopy(event.values, 0, lastAccelData, 0, 3)
             }
             Sensor.TYPE_GYROSCOPE -> {
                 System.arraycopy(event.values, 0, lastGyroData, 0, 3)
             }
+            else -> return
         }
 
-        CoroutineScope(Dispatchers.IO).launch {
-            _sensorDataFlow.tryEmit(
-                SensorData(
-                    timestamp = event.timestamp,
-                    linearAccel = lastAccelData.clone(),
-                    gyroscope = lastGyroData.clone()
-                )
+        _sensorDataFlow.tryEmit(
+            SensorData(
+                timestamp = event.timestamp,
+                linearAccel = lastAccelData.clone(),
+                gyroscope = lastGyroData.clone()
             )
-        }
+        )
     }
 
     override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) {

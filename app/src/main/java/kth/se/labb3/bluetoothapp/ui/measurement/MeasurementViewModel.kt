@@ -54,6 +54,7 @@ class MeasurementViewModel(
 
         dataCollectionJob = sensorRepository.sensorDataFlow
             .onEach { sensorData ->
+                android.util.Log.d("ViewModel", "DATA MOTTAGEN: Y=${sensorData.linearAccel[1]}")
                 val processedData = dataProcessor.processData(sensorData)
 
                 processedDataList.add(processedData)
@@ -62,7 +63,7 @@ class MeasurementViewModel(
                     it.copy(
                         currentAngleAlgo1 = processedData.angleAlgo1,
                         currentAngleAlgo2 = processedData.angleAlgo2,
-                        recordedData = processedDataList.toList()
+                       // recordedData = processedDataList.toList()
                     )
                 }
             }
@@ -76,7 +77,8 @@ class MeasurementViewModel(
 
         _uiState.update {
             it.copy(
-                isRecording = false
+                isRecording = false,
+                recordedData = processedDataList.toList()
             )
         }
     }
