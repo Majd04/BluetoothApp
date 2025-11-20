@@ -26,7 +26,11 @@ class InternalSensorManager(
 
     private val gyroscopeSensor: Sensor? =
         sensorManager.getDefaultSensor(Sensor.TYPE_GYROSCOPE)
-    private val _sensorDataFlow = MutableSharedFlow<SensorData>()
+    private val _sensorDataFlow = MutableSharedFlow<SensorData>(
+        replay = 1,
+        extraBufferCapacity = 1,
+        onBufferOverflow = kotlinx.coroutines.channels.BufferOverflow.DROP_OLDEST
+    )
     override val sensorDataFlow: Flow<SensorData> = _sensorDataFlow.asSharedFlow()
     private var lastAccelData = FloatArray(3)
     private var lastGyroData = FloatArray(3)
