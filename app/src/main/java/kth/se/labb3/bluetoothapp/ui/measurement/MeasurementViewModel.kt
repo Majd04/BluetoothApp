@@ -17,10 +17,10 @@ import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
 
-// Events för engångshändelser som ska visas i UI (t.ex. Toast/Snackbar eller öppna filväljare)
 sealed class UiEvent {
     object ExportFile : UiEvent()
     data class ShowError(val message: String) : UiEvent()
+    object CloseHistoryDialog : UiEvent() // Nytt event för att stänga dialogen automatiskt
 }
 
 class MeasurementViewModel(
@@ -28,75 +28,109 @@ class MeasurementViewModel(
     private val polarSensorManager: PolarSensorManager,
     private val dataProcessor: DataProcessor,
     private val csvExporter: CsvExporter,
-    private val measurementDao: MeasurementDao // Databas-koppling
+    private val measurementDao: MeasurementDao
 ) : ViewModel() {
 
-    // UI State - Håller all data som visas på skärmen
     private val _uiState = MutableStateFlow(MeasurementState())
     val uiState: StateFlow<MeasurementState> = _uiState.asStateFlow()
 
-    // Kanal för att skicka events till UI (Felmeddelanden, Export)
     private val _eventChannel = Channel<UiEvent>()
     val events = _eventChannel.receiveAsFlow()
 
-    // Hämta all historik från databasen (Flow uppdateras automatiskt om db ändras)
     val measurementHistory: Flow<List<MeasurementEntity>> = measurementDao.getAllMeasurements()
 
-    // Intern lista för pågående mätning
-    private val processedDataList = mutableListOf<ProcessedData>()
+    // Lista för pågående mätning
+    private val currentSessionData = mutableListOf<ProcessedData>()
+
+    // Variabel som håller reda på vilken data vi ska exportera (Nuvarande eller Historisk)
+    private var listToExport: List<ProcessedData> = emptyList()
+
     private var dataCollectionJob: Job? = null
 
     init {
-        // Lyssna på hittade Bluetooth-enheter
         polarSensorManager.scannedDevices
             .onEach { devices -> _uiState.update { it.copy(scannedDevices = devices) } }
             .launchIn(viewModelScope)
 
-        // Lyssna på anslutningsstatus (Connected/Disconnected)
         polarSensorManager.isConnected
             .onEach { connected -> _uiState.update { it.copy(isBluetoothConnected = connected) } }
             .launchIn(viewModelScope)
 
-        // Lyssna på fel från PolarSensorManager (t.ex. "Connection failed")
         polarSensorManager.connectionError
             .onEach { errorMsg -> _eventChannel.send(UiEvent.ShowError(errorMsg)) }
             .launchIn(viewModelScope)
     }
 
-    // --- Sensor Inställningar ---
+    // --- HISTORIK HANTERING ---
+
+    // 1. Konvertera CSV-sträng tillbaka till objekt
+    private fun parseCsvToData(csv: String): List<ProcessedData> {
+        if (csv.isBlank()) return emptyList()
+        return try {
+            csv.split(";").mapNotNull { line ->
+                val parts = line.split(",")
+                if (parts.size == 3) {
+                    ProcessedData(parts[0].toLong(), parts[1].toFloat(), parts[2].toFloat())
+                } else null
+            }
+        } catch (e: Exception) {
+            emptyList()
+        }
+    }
+
+    // 2. Ladda en gammal mätning och visa i grafen
+    fun loadHistoryToGraph(entity: MeasurementEntity) {
+        val loadedData = parseCsvToData(entity.dataPointsCsv)
+
+        if (loadedData.isNotEmpty()) {
+            _uiState.update {
+                it.copy(
+                    recordedData = loadedData,
+                    currentAngleAlgo1 = loadedData.last().angleAlgo1, // Visa sista värdet
+                    currentAngleAlgo2 = loadedData.last().angleAlgo2
+                )
+            }
+            viewModelScope.launch {
+                _eventChannel.send(UiEvent.CloseHistoryDialog) // Stäng dialogen så man ser grafen
+                _eventChannel.send(UiEvent.ShowError("Loaded measurement ID: ${entity.id}"))
+            }
+        }
+    }
+
+    // 3. Exportera en specifik historisk mätning
+    fun exportHistoryItem(entity: MeasurementEntity) {
+        val loadedData = parseCsvToData(entity.dataPointsCsv)
+        if (loadedData.isNotEmpty()) {
+            listToExport = loadedData // Sätt denna lista som mål för export
+            viewModelScope.launch { _eventChannel.send(UiEvent.ExportFile) }
+        }
+    }
+
+    // --- STANDARD FUNKTIONER ---
+
     fun toggleSensorSource(useExternal: Boolean) {
-        // Låt inte användaren byta sensor mitt i en inspelning
         if (_uiState.value.isRecording) return
         _uiState.update { it.copy(useExternalSensor = useExternal) }
     }
 
-    // --- Bluetooth Actions ---
     fun startScanning() = polarSensorManager.startScanning()
-
     fun stopScanning() = polarSensorManager.stopScanning()
 
     fun connectToDevice(device: PolarDeviceInfo) {
-        polarSensorManager.stopScanning() // Sluta scanna när vi försöker ansluta
+        polarSensorManager.stopScanning()
         polarSensorManager.connectToDevice(device.deviceId)
     }
 
     fun disconnectDevice() = polarSensorManager.disconnect()
 
-    // --- Mätning Start/Stopp ---
     fun onStartStopClick() {
-        if (_uiState.value.isRecording) {
-            stopMeasurement()
-        } else {
-            startMeasurement()
-        }
+        if (_uiState.value.isRecording) stopMeasurement() else startMeasurement()
     }
 
     private fun startMeasurement() {
-        // Välj vilken sensor vi ska lyssna på
         val activeRepository: SensorRepository = if (_uiState.value.useExternalSensor) {
-            // Om extern sensor är vald men inte ansluten -> Visa fel
             if (!_uiState.value.isBluetoothConnected) {
-                viewModelScope.launch { _eventChannel.send(UiEvent.ShowError("Not connected to any Polar sensor!")) }
+                viewModelScope.launch { _eventChannel.send(UiEvent.ShowError("Not connected to sensor!")) }
                 return
             }
             polarSensorManager
@@ -104,29 +138,24 @@ class MeasurementViewModel(
             internalSensorManager
         }
 
-        // Återställ data och processor
         dataProcessor.reset()
-        processedDataList.clear()
+        currentSessionData.clear()
         dataCollectionJob?.cancel()
 
-        // Starta sensorn
         activeRepository.startListening()
 
         _uiState.update { it.copy(isRecording = true, recordedData = emptyList()) }
 
-        // Samla in data
         dataCollectionJob = activeRepository.sensorDataFlow
             .onEach { sensorData ->
-                // 1. Kör algoritmerna
                 val processedData = dataProcessor.processData(sensorData)
-                processedDataList.add(processedData)
+                currentSessionData.add(processedData)
 
-                // 2. Uppdatera UI i realtid (Graf + Värden)
                 _uiState.update {
                     it.copy(
                         currentAngleAlgo1 = processedData.angleAlgo1,
                         currentAngleAlgo2 = processedData.angleAlgo2,
-                        recordedData = processedDataList.toList() // Uppdaterar grafen
+                        recordedData = currentSessionData.toList()
                     )
                 }
             }
@@ -134,13 +163,11 @@ class MeasurementViewModel(
     }
 
     private fun stopMeasurement() {
-        // Stoppa sensorer
         internalSensorManager.stopListening()
         polarSensorManager.stopListening()
         dataCollectionJob?.cancel()
 
-        // Spara till Databas om vi har data
-        if (processedDataList.isNotEmpty()) {
+        if (currentSessionData.isNotEmpty()) {
             saveMeasurementToDatabase()
         }
 
@@ -150,9 +177,7 @@ class MeasurementViewModel(
     private fun saveMeasurementToDatabase() {
         viewModelScope.launch {
             try {
-                // Konvertera listan till en enkel sträng för lagring (t.ex. CSV-format i en cell)
-                // Detta sparar tid jämfört med att skapa en separat tabell för datapunkter
-                val csvData = processedDataList.joinToString(separator = ";") {
+                val csvData = currentSessionData.joinToString(separator = ";") {
                     "${it.timestamp},${it.angleAlgo1},${it.angleAlgo2}"
                 }
 
@@ -160,25 +185,25 @@ class MeasurementViewModel(
                     timestamp = System.currentTimeMillis(),
                     dataPointsCsv = csvData
                 )
-
                 measurementDao.insertMeasurement(entity)
                 _eventChannel.send(UiEvent.ShowError("Measurement saved to History!"))
             } catch (e: Exception) {
-                _eventChannel.send(UiEvent.ShowError("Failed to save history: ${e.message}"))
+                _eventChannel.send(UiEvent.ShowError("Failed save: ${e.message}"))
             }
         }
     }
 
-    // --- Export ---
-    fun onExportClick() {
-        if (_uiState.value.isRecording || processedDataList.isEmpty()) return
-        // Triggar UI att öppna filväljaren
+    // --- EXPORT ---
+    fun onExportCurrentDataClick() {
+        if (_uiState.value.isRecording || currentSessionData.isEmpty()) return
+        listToExport = currentSessionData // Exportera nuvarande session
         viewModelScope.launch { _eventChannel.send(UiEvent.ExportFile) }
     }
 
     fun exportDataToUri(uri: Uri) {
         viewModelScope.launch {
-            csvExporter.exportDataAsCsv(processedDataList, uri)
+            // Här använder vi listan vi sparade i 'listToExport'
+            csvExporter.exportDataAsCsv(listToExport, uri)
             _eventChannel.send(UiEvent.ShowError("Export successful!"))
         }
     }
